@@ -50,4 +50,7 @@ export const cfg = {
   lg_email: process.env.LG_EMAIL || process.env.PG_EMAIL || process.env.EMAIL, // prime-gaming: external: legacy-games: email to use for redeeming
   pg_claimdlc: process.env.PG_CLAIMDLC == '1', // prime-gaming: claim in-game content
   pg_timeLeft: Number(process.env.PG_TIMELEFT), // prime-gaming: check time left to claim and skip game if there are more than PG_TIMELEFT days left to claim it
+  //Xiaomi Mi Points claimer
+  mi_email: process.env.MI_EMAIL || process.env.EMAIL,
+  mi_password: process.env.MI_PASSWORD || process.env.PASSWORD
 };
