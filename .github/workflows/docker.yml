@@ -67,6 +67,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/free-games-claimer:${{env.IMAGE_TAG}}
-            ghcr.io/${{ github.actor }}/free-games-claimer:${{env.IMAGE_TAG}}
+            ghcr.io/${{ github.actor | lowercase }}/free-games-claimer:${{env.IMAGE_TAG}}
           cache-from: type=gha
           cache-to: type=gha,mode=max
