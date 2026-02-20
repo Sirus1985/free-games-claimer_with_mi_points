@@ -1,15 +1,14 @@
-import { chromium } from 'playwright-extra'
+import { chromium } from 'playwright-extra';
 
 import { resolve, jsonDb, datetime, stealth, notify } from './src/util.js';
 import { existsSync } from 'fs';
 import { cfg } from './src/config.js';
 
-// WICHTIG: Das Stealth-Plugin aktivieren!
-// Das hat im vorherigen Code gefehlt, weshalb du sofort erkannt wurdest.
+// IMPORTANT: Enable stealth plugin to avoid detection
 chromium.use(stealth);
 
-const EMAIL = cfg.mi_email
-const PASSWORD = cfg.mi_password
+const EMAIL = cfg.mi_email;
+const PASSWORD = cfg.mi_password;
 const COOKIE_FILE = resolve('data/mi-cookies.json');
 
 if (!EMAIL || !PASSWORD) {
@@ -18,161 +17,375 @@ if (!EMAIL || !PASSWORD) {
 }
 
 (async () => {
-
-  const browser = await chromium.launch({ 
-    headless: false,  
+  const browser = await chromium.launch({
+    headless: false,
     args: [
-      '--no-sandbox', 
-      '--disable-setuid-sandbox', 
-      '--disable-blink-features=AutomationControlled', 
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
       '--window-position=0,0',
-      '--window-size=1920,1080'
+      `--window-size=${cfg.width},${cfg.height}`
     ]
   });
-  
+
   const contextOptions = {
     locale: 'de-DE',
     timezoneId: 'Europe/Berlin',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    viewport: { width: 1920, height: 1080 }
+    viewport: { width: cfg.width, height: cfg.height }
   };
 
-  // Cookies laden
+  // Load cookies if available
   if (existsSync(COOKIE_FILE)) {
-    console.log(`🍪 Loading cookies...`);
+    console.log('🍪 Loading cookies from previous session...');
     contextOptions.storageState = COOKIE_FILE;
   }
 
   const context = await browser.newContext(contextOptions);
-  
-  // HINWEIS: Wir brauchen hier keine manuellen 'navigator.webdriver' Hacks mehr,
-  // weil 'chromium.use(stealth)' das jetzt professionell für uns macht.
-
   const page = await context.newPage();
+
+  const startTime = Date.now();
 
   try {
     console.log('--- Xiaomi Points Claimer Start ---');
-    
-    // 1. ZIEL: Points-Center
-    console.log('Navigating to Points-Center...');
-    
-    // Wir fangen Fehler beim Laden ab (falls Access Denied kommt)
-    const response = await page.goto('https://www.mi.com/de/points-center', { waitUntil: 'domcontentloaded' });
-    
-    // Status-Check direkt nach dem Laden
+
+    // 1. Target: Points Center
+    console.log('Navigating to Points Center...');
+
+    // Catch errors while loading (e.g. Access Denied)
+    const response = await page.goto('https://www.mi.com/de/points-center', {
+      waitUntil: 'domcontentloaded',
+      timeout: cfg.timeout
+    });
+
+    // Immediate status check after load
     if (response && response.status() === 403) {
-        console.error('🚨 403 FORBIDDEN - Sofort geblockt. Deine IP oder der Browser-Fingerprint mag Xiaomi nicht.');
-        await page.screenshot({ path: 'xiaomi-blocked.png' });
-        process.exit(1);
+      console.error('🚨 403 FORBIDDEN - Immediately blocked. Xiaomi does not like your IP or browser fingerprint.');
+      await takeScreenshot(page, 'xiaomi-blocked.png');
+      process.exit(1);
     }
 
-    // Menschliches Warten
-    await page.waitForTimeout(3000);
-
+    await page.waitForTimeout(randomDelay(3000, 5000));
     const title = await page.title();
     if (title.includes('Access Denied')) {
-        console.error('🚨 Access Denied im Titel erkannt.');
-        await page.screenshot({ path: 'xiaomi-blocked.png' });
-        process.exit(1);
+      console.error('🚨 Access Denied detected in title');
+      await takeScreenshot(page, 'xiaomi-blocked.png');
+      process.exit(1);
     }
 
-    // 2. STATUS & LOGIN CHECK
-    const currentUrl = page.url();
-    
-    if (currentUrl.includes('account.xiaomi.com') || currentUrl.includes('login')) {
-        console.log('🔒 Login page detected.');
-        await performLogin(page, context); 
-    } else {
-        // Cookie Banner wegklicken
-        try {
-            const cookieBtn = page.locator('#truste-consent-button');
-            if (await cookieBtn.isVisible({ timeout: 5000 })) {
-                await cookieBtn.click();
-                await page.waitForTimeout(1000);
-            }
-        } catch (e) {}
-
-        // Prüfen ob wir eingeloggt sind (Nach "Anmelden" suchen)
-        const loginBtn = page.getByText(/Anmelden|Sign in/i).first();
-        if (await loginBtn.isVisible()) {
-            console.log('🔒 Not logged in. Going to login...');
-            await loginBtn.click();
-            await page.waitForURL(url => url.toString().includes('account.xiaomi.com'), { timeout: 60000 });
-            await performLogin(page, context); 
-        }
+    // 2. Accept cookie banner if present
+    try {
+      const cookieBtn = page.locator('#truste-consent-button');
+      if (await cookieBtn.isVisible({ timeout: 5000 })) {
+        console.log('Clicking cookie banner...');
+        await cookieBtn.click();
+        await page.waitForTimeout(randomDelay(2000, 6000));
+      }
+    } catch (e) {
+      if (cfg.debug) {
+        console.log('No cookie banner detected or click failed (continuing).');
+      }
     }
 
-    // 3. CLAIMEN
+    // 3. Claim points
     console.log('Searching for claim button...');
-    
-    // Button suchen (mit Warten)
+
     const claimButton = page.locator('.points-task__info .mi-btn--primary').first();
     try {
-        await claimButton.waitFor({ state: 'visible', timeout: 10000 });
-    } catch(e) {
-        console.log('⚠️ Button not found immediately.');
+      await claimButton.waitFor({
+        state: 'visible',
+        timeout: cfg.timeout
+      });
+    } catch (e) {
+      console.log('⚠️ Claim button not found within timeout.');
     }
 
     if (await claimButton.isVisible()) {
-        const classAttribute = await claimButton.getAttribute('class');
-        if (classAttribute && classAttribute.includes('mi-btn--disabled')) {
-            console.log('🛑 Already claimed today (Button disabled).');
+      const classAttribute = await claimButton.getAttribute('class');
+      if (classAttribute && classAttribute.includes('mi-btn--disabled')) {
+        console.log('🛑 Already claimed today (button disabled).');
+      } else {
+        console.log('🔘 Claim button found, preparing to click...');
+
+        if (cfg.interactive) {
+          const readline = await import('readline');
+          const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+          });
+          const shouldContinue = await new Promise(resolve => {
+            rl.question('Interactive mode: Press ENTER to claim, or "skip": ', answer => {
+              rl.close();
+              resolve(answer.trim().toLowerCase() !== 'skip');
+            });
+          });
+          if (!shouldContinue) {
+            console.log('Skipping claim (interactive mode).');
+            if (cfg.notify) notify(cfg.notify_title || 'Xiaomi Points', 'Skipped claim.');
+            return;
+          }
+        }
+
+        if (cfg.dryrun) {
+          console.log('💧 DRYRUN: would click claim button now.');
         } else {
-            console.log('🔘 Clicking claim button...');
-            await claimButton.click();
-            
-            // Prüfen ob Login kommt
+          // 🔧 CRITICAL: Check we're still on points-center before clicking
+          const currentUrl = page.url();
+          if (!currentUrl.includes('points-center')) {
+            console.log('⚠️ Not on points-center page, skipping claim.');
+          } else {
+            console.log('🖱️ Clicking claim button...');
+            await takeScreenshot(page, 'debug-before-claim-click.png');
+            await humanClick(page, claimButton);
+
+            // 🔧 ROBUST LOGIN DETECTION: URL change OR login elements
             try {
-                await page.waitForURL(url => url.toString().includes('account.xiaomi.com'), { timeout: 5000 });
-                console.log('🔒 Click triggered login.');
-                await performLogin(page, context);
-                // Nach Login nochmal probieren
-                await page.goto('https://www.mi.com/de/points-center', { waitUntil: 'domcontentloaded' });
-                await page.waitForTimeout(4000);
-                const retryBtn = page.locator('.points-task__info .mi-btn--primary').first();
-                if (await retryBtn.isVisible()) {
-                    await retryBtn.click();
-                    console.log('✅ Clicked after login.');
+              await Promise.race([
+                page.waitForURL(
+                  url => url.toString().includes('account.xiaomi.com') || 
+                         url.toString().includes('login') ||
+                         url.toString().includes('mi-account'),
+                  { timeout: 8000 }
+                ),
+                page.waitForSelector(
+                  'input[name="account"], input[id="username"], input[name="email"], input[type="email"]',
+                  { timeout: 8000 }
+                )
+              ]);
+              console.log('🔒 Login page detected.');
+              await performLogin(page, context);
+
+              // Return to points center after login
+              console.log('Returning to points center after login...');
+              await page.goto('https://www.mi.com/de/points-center', {
+                waitUntil: 'domcontentloaded',
+                timeout: cfg.timeout
+              });
+              await page.waitForTimeout(randomDelay(4000, 8000));
+
+              // Retry claim if button still available
+              const retryClaimBtn = page.locator('.points-task__info .mi-btn--primary').first();
+              if (await retryClaimBtn.isVisible({ timeout: 5000 })) {
+                const retryClass = await retryClaimBtn.getAttribute('class');
+                if (!retryClass?.includes('mi-btn--disabled')) {
+                  await humanClick(page, retryClaimBtn);
+                  console.log('✅ Successfully clicked claim button after login.');
+                  await takeScreenshot(page, 'xiaomi-claimed-after-login.png');
+                } else {
+                  console.log('✅ Claim button disabled after login (success).');
                 }
+              } else {
+                console.log('✅ No retry needed after login.');
+              }
             } catch (e) {
-                console.log('✅ Click successful (no redirect).');
+              console.log('✅ Initial click successful, no login required.');
             }
-            await page.waitForTimeout(5000);
-            await page.screenshot({ path: 'xiaomi-success.png' });
+          }
         }
+
+        await page.waitForTimeout(randomDelay(1000, 3000));
+        await takeScreenshot(page, 'xiaomi-final-state.png');
+      }
     } else {
-        console.log('ℹ️ No button found. Checking for "Checked in" status...');
-        if (await page.getByText(/Eingecheckt|Checked in/i).first().isVisible()) {
-            console.log('✅ "Checked in" text found. All good.');
-        } else {
-            await page.screenshot({ path: 'xiaomi-status.png' });
-        }
+      console.log('⚠️ Claim button not visible on page.');
     }
 
-    // Speichern
-    await context.storageState({ path: COOKIE_FILE });
-    console.log(`💾 Session saved.`);
+    if (cfg.time) {
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`⏱️ Total runtime: ${duration} seconds.`);
+    }
+
+    if (cfg.notify) {
+      notify(
+        cfg.notify_title || 'Xiaomi Points',
+        cfg.dryrun 
+          ? 'DRYRUN: Xiaomi points claim simulated.' 
+          : 'Xiaomi points claim completed.'
+      );
+    }
 
   } catch (error) {
-    console.error('❌ Error:', error);
-    await page.screenshot({ path: 'xiaomi-error.png' });
+    console.error('❌ Error:', error.message);
+    await takeScreenshot(page, 'xiaomi-error.png');
+
+    if (cfg.notify) {
+      notify(
+        cfg.notify_title || 'Xiaomi Points',
+        `Error: ${error.message}`
+      );
+    }
+
+    if (cfg.nowait) process.exit(1);
   } finally {
     await browser.close();
   }
 })();
 
 async function performLogin(page, context) {
-    await page.waitForSelector('input[name="account"], input[id="username"]', { timeout: 30000 });
-    console.log('✍️ Logging in...');
-    await page.fill('input[name="account"], input[id="username"]', EMAIL);
-    await page.fill('input[name="password"], input[id="pwd"]', PASSWORD);
-    
-    const agreement = page.locator('.agreement-checkbox');
-    if (await agreement.isVisible()) await agreement.check();
+  console.log('✍️ Starting login process...');
+  await takeScreenshot(page, 'debug-login-page.png');
 
-    await page.click('button[type="submit"]');
-    await page.waitForURL(url => !url.toString().includes('account.xiaomi.com'), { timeout: 30000 });
-    console.log('Login successful.');
-    
-    await context.storageState({ path: COOKIE_FILE });
+  // 🔧 Multiple selectors for email field
+  const emailSelectors = [
+    'input[name="account"]',
+    'input[id="username"]',
+    'input[name="email"]',
+    'input[type="email"]',
+    'input[placeholder*="email"], input[placeholder*="Email"], input[placeholder*="E-Mail"]'
+  ];
+
+  let emailField = null;
+  for (const selector of emailSelectors) {
+    try {
+      emailField = page.locator(selector).first();
+      await emailField.waitFor({ state: 'visible', timeout: 3000 });
+      console.log(`✅ Email field found: ${selector}`);
+      break;
+    } catch (e) {
+      if (cfg.debug) console.log(`Trying next email selector: ${selector}`);
+    }
+  }
+
+  if (!emailField) {
+    throw new Error('No email input field found on login page');
+  }
+
+  await emailField.type(EMAIL, { delay: 80 + Math.random() * 120 });
+
+  // 🔧 Multiple selectors for password
+  const pwdSelectors = [
+    'input[name="password"]',
+    'input[id="pwd"]',
+    'input[name="pwd"]',
+    'input[type="password"]'
+  ];
+
+  let pwdField = null;
+  for (const selector of pwdSelectors) {
+    try {
+      pwdField = page.locator(selector).first();
+      await pwdField.waitFor({ state: 'visible', timeout: 3000 });
+      console.log(`✅ Password field found: ${selector}`);
+      break;
+    } catch (e) {}
+  }
+
+  if (!pwdField) {
+    throw new Error('No password input field found');
+  }
+
+  await pwdField.type(PASSWORD, { delay: 80 + Math.random() * 120 });
+
+  // Checkbox if present
+  const agreement = page.locator('.agreement-checkbox, input[type="checkbox"]:not([disabled])');
+  if (await agreement.isVisible({ timeout: 2000 })) {
+    await agreement.check();
+    console.log('✅ Agreement checkbox checked.');
+  }
+
+  // Submit button with multiple selectors
+  const submitSelectors = [
+    'button[type="submit"]',
+    '.login-btn',
+    '.btn-login',
+    'input[type="submit"]',
+    '.btn-primary'
+  ];
+
+  let submitBtn = null;
+  for (const selector of submitSelectors) {
+    try {
+      submitBtn = page.locator(selector).first();
+      await submitBtn.waitFor({ state: 'visible', timeout: 2000 });
+      console.log(`✅ Submit button found: ${selector}`);
+      break;
+    } catch (e) {}
+  }
+
+  if (submitBtn) {
+    await humanClick(page, submitBtn);
+  } else {
+    console.log('⚠️ No submit button found, trying Enter key...');
+    await page.keyboard.press('Enter');
+  }
+
+  // Wait for successful login (leave login page)
+  await page.waitForURL(
+    url => !url.toString().includes('account.xiaomi.com') && 
+           !url.toString().includes('login') &&
+           !url.toString().includes('mi-account'),
+    { timeout: cfg.login_timeout }
+  );
+  console.log('✅ Login successful.');
+  await takeScreenshot(page, 'debug-post-login.png');
+
+  // Save session
+  await context.storageState({ path: COOKIE_FILE });
+  console.log('💾 Session cookies saved.');
+}
+
+// Helper: natural delays
+function randomDelay(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// Helper: screenshots with config support
+async function takeScreenshot(page, filename) {
+  const dir = cfg.dir.screenshots;
+  if (dir === '0') return;
+  const path = `${dir}/${filename}`;
+  await page.screenshot({ path, fullPage: true });
+  if (cfg.debug) console.log(`📸 Screenshot: ${path}`);
+}
+
+// Helper: ROBUST human-like click with element validation
+async function humanClick(page, selectorOrLocator) {
+  let element;
+  try {
+    element = typeof selectorOrLocator === 'string'
+      ? page.locator(selectorOrLocator).first()
+      : selectorOrLocator;
+
+    // 🔧 Validate element exists BEFORE proceeding
+    await element.waitFor({ state: 'visible', timeout: 3000 });
+    await element.waitFor({ state: 'attached', timeout: 2000 });
+  } catch (e) {
+    throw new Error(`humanClick failed: Element not found/visible (${selectorOrLocator})`);
+  }
+
+  // Scroll to element
+  const box = await element.boundingBox();
+  if (box) {
+    const viewport = page.viewportSize();
+    if (box.y < 0 || box.y + box.height > viewport.height) {
+      console.log('📜 Scrolling to element...');
+      const targetY = box.y - viewport.height / 2;
+      const steps = 5 + Math.floor(Math.random() * 5);
+      for (let i = 1; i <= steps; i++) {
+        await page.mouse.wheel(0, (targetY / steps) * i);
+        await page.waitForTimeout(randomDelay(50, 150));
+      }
+      await page.waitForTimeout(randomDelay(500, 1000));
+    }
+  }
+
+  // Natural mouse movement
+  if (box) {
+    const targetX = box.x + box.width * (0.3 + Math.random() * 0.4);
+    const targetY = box.y + box.height * (0.3 + Math.random() * 0.4);
+    await page.mouse.move(targetX, targetY, { steps: 35 });
+    await page.waitForTimeout(randomDelay(300, 600));
+    await page.mouse.down();
+    await page.waitForTimeout(randomDelay(100, 250));
+    await page.mouse.up();
+  }
+
+  console.log('🖱️ Executing force click...');
+  await element.click({
+    force: true,
+    noWaitAfter: true,
+    trial: true
+  });
+
+  await page.waitForTimeout(randomDelay(1500, 3000));
 }
